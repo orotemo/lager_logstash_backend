@@ -109,6 +109,7 @@ handle_event({log, {lager_msg, _, Metadata, Severity, {Date, Time}, Message}}, #
                                                   metadata(Metadata, Config_Meta),
                                                   State#state.logstash_extras
                                          ),
+
       gen_udp:send(State#state.socket,
                    State#state.logstash_address,
                    State#state.logstash_port,
@@ -173,10 +174,20 @@ logtime() ->
     lists:flatten(io_lib:format("~4.10.0B-~2.10.0B-~2.10.0BT~2.10.0B:~2.10.0B:~2.10.0B.~.10.0BZ",
         [Year, Month, Day, Hour, Minute, Second, 0])).
 
-metadata(Metadata, Config_Meta) ->
-    Expanded = [{Name, Properties, proplists:get_value(Name, Metadata)} || {Name, Properties} <- Config_Meta],
-    [{list_to_binary(atom_to_list(Name)), encode_value(Value, proplists:get_value(encoding, Properties))} || {Name, Properties, Value} <- Expanded, Value =/= undefined].
 
+tuple_for_fields(meta, _Properties, {Value}) ->
+  Value;
+tuple_for_fields(meta, _Properties, Value) when is_list(Value) ->
+  Value;
+tuple_for_fields(Name, Properties, Value) ->
+  {list_to_binary(atom_to_list(Name)), encode_value(Value, proplists:get_value(encoding, Properties))}.
+
+metadata(Metadata, Config_Meta) ->
+  Expanded = [{Name, Properties, proplists:get_value(Name, Metadata)} || {Name, Properties} <- Config_Meta],
+  lists:flatten([tuple_for_fields(Name, Properties, Value) ||
+      {Name, Properties, Value} <- Expanded, Value =/= undefined]).
+
+encode_value(Val, json) -> Val;
 encode_value(Val, string) when is_list(Val) -> list_to_binary(Val);
 encode_value(Val, string) when is_binary(Val) -> Val;
 encode_value(Val, string) when is_atom(Val) -> list_to_binary(atom_to_list(Val));
