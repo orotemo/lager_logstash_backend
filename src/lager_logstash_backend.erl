@@ -136,7 +136,8 @@ code_change(_OldVsn, State, _Extra) ->
   Vsn = get_app_version(),
   {ok, State#state{node_version=Vsn}}.
 
-encode_json_event(_, Node, Node_Role, Node_Version, Severity, Date, Time, Message, Metadata, LogstashExtras) ->
+encode_json_event(_, Node, Node_Role, Node_Version, Severity, Date, Time,
+                  Message, {MetaJson, Metadata}, LogstashExtras) ->
   DateTime = io_lib:format("~sT~s", [Date,Time]),
   LogstashFieldsList = [
       {<<"fields">>,
@@ -147,6 +148,7 @@ encode_json_event(_, Node, Node_Role, Node_Version, Severity, Date, Time, Messag
             {<<"node">>, Node}
             ] ++ Metadata }
       },
+      {<<"meta">>, MetaJson},
       {<<"@timestamp">>, list_to_binary(DateTime)}, %% use the logstash timestamp
       {<<"message">>, safe_list_to_binary(Message)},
       {<<"type">>, <<"erlang">>}
@@ -174,18 +176,11 @@ logtime() ->
     lists:flatten(io_lib:format("~4.10.0B-~2.10.0B-~2.10.0BT~2.10.0B:~2.10.0B:~2.10.0B.~.10.0BZ",
         [Year, Month, Day, Hour, Minute, Second, 0])).
 
-
-tuple_for_fields(meta, _Properties, {Value}) ->
-  Value;
-tuple_for_fields(meta, _Properties, Value) when is_list(Value) ->
-  Value;
-tuple_for_fields(Name, Properties, Value) ->
-  {list_to_binary(atom_to_list(Name)), encode_value(Value, proplists:get_value(encoding, Properties))}.
-
 metadata(Metadata, Config_Meta) ->
   Expanded = [{Name, Properties, proplists:get_value(Name, Metadata)} || {Name, Properties} <- Config_Meta],
-  lists:flatten([tuple_for_fields(Name, Properties, Value) ||
-      {Name, Properties, Value} <- Expanded, Value =/= undefined]).
+  {proplists:get_value(meta, Metadata),
+   [{list_to_binary(atom_to_list(Name)), encode_value(Value, proplists:get_value(encoding, Properties))} ||
+      {Name, Properties, Value} <- Expanded, Value =/= undefined]}.
 
 encode_value(Val, json) -> Val;
 encode_value(Val, string) when is_list(Val) -> list_to_binary(Val);
