@@ -24,8 +24,7 @@
                 logstash_address :: inet:ip_address(),
                 node_role :: string(),
                 node_version :: string(),
-                metadata :: list(),
-                logstash_extras :: list()
+                metadata :: list()
 }).
 
 init(Params) ->
@@ -48,9 +47,6 @@ init(Params) ->
   Port = proplists:get_value(logstash_port, Params, 9125),
   Node_Role = proplists:get_value(node_role, Params, "no_role"),
   Node_Version = proplists:get_value(node_version, Params, "no_version"),
-  LogstashExtras = lists:map(
-      fun({Atom, Str})-> {Atom, list_to_binary(Str)} end,
-      proplists:get_value(logstash_extras, Params, [])),
 
   Metadata = proplists:get_value(metadata, Params, []) ++
      [
@@ -77,9 +73,7 @@ init(Params) ->
               logstash_address = Address,
               node_role = Node_Role,
               node_version = Node_Version,
-              metadata = Metadata,
-              logstash_extras = LogstashExtras
-             }}.
+              metadata = Metadata}}.
 
 handle_call({set_loglevel, Level}, State) ->
   {ok, ok, State#state{level=lager_util:level_to_num(Level)}};
@@ -106,10 +100,7 @@ handle_event({log, {lager_msg, _, Metadata, Severity, {Date, Time}, Message}}, #
                                                   Date,
                                                   Time,
                                                   Message,
-                                                  metadata(Metadata, Config_Meta),
-                                                  State#state.logstash_extras
-                                         ),
-
+                                                  metadata(Metadata, Config_Meta)),
       gen_udp:send(State#state.socket,
                    State#state.logstash_address,
                    State#state.logstash_port,
@@ -136,32 +127,18 @@ code_change(_OldVsn, State, _Extra) ->
   Vsn = get_app_version(),
   {ok, State#state{node_version=Vsn}}.
 
-encode_json_event(_, Node, Node_Role, Node_Version, Severity, Date, Time,
-                  Message, {Metadata, MetaJson, Tags}, LogstashExtras) ->
+encode_json_event(_, Node, Node_Role, Node_Version, Severity, Date, Time, Message, Metadata) ->
   DateTime = io_lib:format("~sT~s", [Date,Time]),
-  LogstashFieldsList = [
-      {<<"fields">>,
-       {[
-            {<<"level">>, Severity},
-            {<<"role">>, list_to_binary(Node_Role)},
-            {<<"role_version">>, list_to_binary(Node_Version)},
-            {<<"node">>, Node}
-            ] ++ Metadata }
-      },
-      {<<"@timestamp">>, list_to_binary(DateTime)}, %% use the logstash timestamp
-      {<<"message">>, safe_list_to_binary(Message)},
-      {<<"tags">>, Tags},
-      {<<"type">>, <<"erlang">>}
-      ],
-
-  FinalFields = case MetaJson of
-    undefined -> lists:append(LogstashFieldsList, LogstashExtras);
-    MetaJson ->
-      lists:append([LogstashFieldsList,
-                    LogstashExtras,
-                    [{<<"meta">>, MetaJson}]])
-  end,
-  jiffy:encode({ FinalFields }).
+  jiffy:encode([{<<"fields">>, [
+      {<<"level">>, Severity},
+      {<<"role">>, list_to_binary(Node_Role)},
+      {<<"role_version">>, list_to_binary(Node_Version)},
+      {<<"node">>, Node}
+    ] ++ Metadata},
+    {<<"@timestamp">>, list_to_binary(DateTime)}, %% use the logstash timestamp
+    {<<"message">>, safe_list_to_binary(Message)},
+    {<<"type">>, <<"erlang">>}
+  ]).
 
 safe_list_to_binary(L) when is_list(L) ->
   unicode:characters_to_binary(L);
@@ -183,26 +160,10 @@ logtime() ->
     lists:flatten(io_lib:format("~4.10.0B-~2.10.0B-~2.10.0BT~2.10.0B:~2.10.0B:~2.10.0B.~.10.0BZ",
         [Year, Month, Day, Hour, Minute, Second, 0])).
 
-tags_from_meta(Metadata) ->
-  case proplists:get_value(tags, Metadata) of
-    undefined -> [];
-    Tags -> [encode_value(Tag, string) || Tag <- Tags]
-  end.
-
 metadata(Metadata, Config_Meta) ->
-  Expanded = [{Name, Properties, proplists:get_value(Name, Metadata)}
-              || {Name, Properties} <- Config_Meta],
+    Expanded = [{Name, Properties, proplists:get_value(Name, Metadata)} || {Name, Properties} <- Config_Meta],
+    [{list_to_binary(atom_to_list(Name)), encode_value(Value, proplists:get_value(encoding, Properties))} || {Name, Properties, Value} <- Expanded, Value =/= undefined].
 
-  MetadataEncoded = [
-      {list_to_binary(atom_to_list(Name)),
-       encode_value(Value, proplists:get_value(encoding, Properties))}
-      || {Name, Properties, Value} <- Expanded, Value =/= undefined],
-
-  {MetadataEncoded,
-   proplists:get_value(meta, Metadata),
-   tags_from_meta(Metadata)}.
-
-encode_value(Val, json) -> Val;
 encode_value(Val, string) when is_list(Val) -> list_to_binary(Val);
 encode_value(Val, string) when is_binary(Val) -> Val;
 encode_value(Val, string) when is_atom(Val) -> list_to_binary(atom_to_list(Val));
