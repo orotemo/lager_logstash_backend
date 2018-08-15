@@ -7,25 +7,25 @@
 -behaviour(gen_event).
 
 -export([init/1,
-         handle_call/2,
-         handle_event/2,
-         handle_info/2,
-         terminate/2,
-         code_change/3,
-         logtime/0,
-         get_app_version/0
+  handle_call/2,
+  handle_event/2,
+  handle_info/2,
+  terminate/2,
+  code_change/3,
+  logtime/0,
+  get_app_version/0
 ]).
 
 -record(state, {socket :: pid(),
-                lager_level_type :: 'mask' | 'number' | 'unknown',
-                level :: atom(),
-                logstash_host :: string(),
-                logstash_port :: number(),
-                logstash_address :: inet:ip_address(),
-                node_role :: string(),
-                node_version :: string(),
-                metadata :: list(),
-                logstash_token :: string()
+  lager_level_type :: 'mask' | 'number' | 'unknown',
+  level :: atom(),
+  logstash_host :: string(),
+  logstash_port :: number(),
+  logstash_address :: inet:ip_address(),
+  node_role :: string(),
+  node_version :: string(),
+  metadata :: list(),
+  logstash_token :: string()
 }).
 
 init(Params) ->
@@ -51,32 +51,32 @@ init(Params) ->
   Node_Version = proplists:get_value(node_version, Params, "no_version"),
 
   Metadata = proplists:get_value(metadata, Params, []) ++
-     [
-         {pid, [{encoding, process}]},
-         {line, [{encoding, integer}]},
-         {file, [{encoding, string}]},
-         {module, [{encoding, atom}]}
-     ],
+    [
+      {pid, [{encoding, process}]},
+      {line, [{encoding, integer}]},
+      {file, [{encoding, string}]},
+      {module, [{encoding, atom}]}
+    ],
 
- {Socket, Address} =
-   case inet:getaddr(Host, inet) of
-     {ok, Addr} ->
-       {ok, Sock} = gen_udp:open(0, [list]),
-       {Sock, Addr};
-     {error, _Err} ->
-       {undefined, undefined}
-   end,
+  {Socket, Address} =
+    case inet:getaddr(Host, inet) of
+      {ok, Addr} ->
+        {ok, Sock} = gen_udp:open(0, [list]),
+        {Sock, Addr};
+      {error, _Err} ->
+        {undefined, undefined}
+    end,
 
   {ok, #state{socket = Socket,
-              lager_level_type = Lager_Level_Type,
-              level = Level,
-              logstash_host = Host,
-              logstash_port = Port,
-              logstash_address = Address,
-              node_role = list_to_binary(Node_Role),
-              node_version = list_to_binary(Node_Version),
-              metadata = Metadata,
-              logstash_token = list_to_binary(Token) }}.
+    lager_level_type = Lager_Level_Type,
+    level = Level,
+    logstash_host = Host,
+    logstash_port = Port,
+    logstash_address = Address,
+    node_role = list_to_binary(Node_Role),
+    node_version = list_to_binary(Node_Version),
+    metadata = Metadata,
+    logstash_token = list_to_binary(Token) }}.
 
 handle_call({set_loglevel, Level}, State) ->
   {ok, ok, State#state{level=lager_util:level_to_num(Level)}};
@@ -92,25 +92,20 @@ handle_event({log, _}, #state{socket=S}=State) when S =:= undefined ->
 handle_event({log, {lager_msg, Q, Metadata, Severity, {Date, Time}, _, Message}}, State) ->
   handle_event({log, {lager_msg, Q, Metadata, Severity, {Date, Time}, Message}}, State);
 
-handle_event({log, {lager_msg, _, Metadata, Severity, {Date, Time}, Message}}, #state{level=L, metadata=Config_Meta}=State) ->
+handle_event({log, {lager_msg, _, Metadata, Severity, {Date, Time}, Message}},
+  #state{level=L}=State) ->
   case lager_util:level_to_num(Severity) =< L of
     true ->
-      Encoded_Message = encode_json_event(State#state.lager_level_type,
-                                          node(),
-                                          State#state.node_role,
-                                          State#state.node_version,
-                                          State#state.logstash_token,
-                                          Severity,
-                                          Date,
-                                          Time,
-                                          Message,
-                                          metadata(Metadata, Config_Meta)),
-      gen_udp:send(State#state.socket,
-                   State#state.logstash_address,
-                   State#state.logstash_port,
-                   Encoded_Message);
-    _ ->
-      ok
+      try
+        send_message(State, Severity, {Date, Time}, Message, Metadata)
+      catch
+        Error:Reason  ->
+          ErrorFlat = lists:flatten(io_lib:format(
+            "Got error durring json log parsing of object ~p, Error=~p, Reason=~p",
+            [Metadata, Error, Reason])),
+          send_message(State, error, {Date, Time}, ErrorFlat, [])
+      end;
+    _ -> ok
   end,
   {ok, State};
 
@@ -131,20 +126,37 @@ code_change(_OldVsn, State, _Extra) ->
   Vsn = get_app_version(),
   {ok, State#state{node_version=Vsn}}.
 
-encode_json_event(_, Node, Node_Role, Node_Version, Token, Severity, Date, Time,
-                  Message, Metadata) ->
+send_message(State, Severity, {Date, Time}, Message, Metadata) ->
+  Encoded_Message = encode_json_event(node(),
+    State#state.node_role,
+    State#state.node_version,
+    State#state.logstash_token,
+    Severity,
+    Date,
+    Time,
+    Message,
+    to_proper_ejson(Metadata)),
+  gen_udp:send(State#state.socket,
+    State#state.logstash_address,
+    State#state.logstash_port,
+    Encoded_Message).
+
+encode_json_event(Node, Node_Role, Node_Version, Token, Severity, Date, Time,
+  Message, {Metadata}) ->
   DateTime = io_lib:format("~sT~s", [Date,Time]),
-  jiffy:encode({[{<<"fields">>, {[
-              {<<"level">>, Severity},
-              {<<"role">>, Node_Role},
-              {<<"role_version">>, Node_Version},
-              {<<"node">>, Node}
-              ] ++ Metadata}},
-                 {<<"@timestamp">>, list_to_binary(DateTime)}, %% use the logstash timestamp
-                 {<<"message">>, safe_list_to_binary(Message)},
-                 {<<"type">>, <<"erlang">>},
-                 {<<"token">>, Token}
-                ]}).
+  Fields = {[
+    {<<"version">>, Node_Version},
+    {<<"node">>, Node}
+  ] ++ Metadata},
+
+  jiffy:encode({[
+    {<<"log_level">>, Severity},
+    {<<"fields">>, Fields},
+    {<<"@timestamp">>, list_to_binary(DateTime)}, %% use the logstash timestamp
+    {<<"message">>, safe_list_to_binary(Message)},
+    {<<"type">>, Node_Role},
+    {<<"token">>, Token}
+  ]}).
 
 safe_list_to_binary(L) when is_list(L) ->
   unicode:characters_to_binary(L);
@@ -162,23 +174,14 @@ get_app_version() ->
   end.
 
 logtime() ->
-    {{Year, Month, Day}, {Hour, Minute, Second}} = erlang:universaltime(),
-    lists:flatten(io_lib:format("~4.10.0B-~2.10.0B-~2.10.0BT~2.10.0B:~2.10.0B:~2.10.0B.~.10.0BZ",
-        [Year, Month, Day, Hour, Minute, Second, 0])).
+  {{Year, Month, Day}, {Hour, Minute, Second}} = erlang:universaltime(),
+  lists:flatten(io_lib:format("~4.10.0B-~2.10.0B-~2.10.0BT~2.10.0B:~2.10.0B:~2.10.0B.~.10.0BZ",
+    [Year, Month, Day, Hour, Minute, Second, 0])).
 
-metadata(Metadata, Config_Meta) ->
-    Expanded = [{Name, Properties, proplists:get_value(Name, Metadata)} || {Name, Properties} <- Config_Meta],
-    [{list_to_binary(atom_to_list(Name)), encode_value(Value, proplists:get_value(encoding, Properties))} || {Name, Properties, Value} <- Expanded, Value =/= undefined].
+to_proper_ejson(DS) when is_list(DS) -> {[to_proper_ejson(I) || I <- DS]};
+to_proper_ejson({K, V}) -> {to_proper_key(K), to_proper_ejson(V)};
+to_proper_ejson(Other) -> Other.
 
-encode_value(Val, json) -> Val;
-encode_value(Val, string) when is_list(Val) -> list_to_binary(Val);
-encode_value(Val, string) when is_binary(Val) -> Val;
-encode_value(Val, string) when is_atom(Val) -> list_to_binary(atom_to_list(Val));
-encode_value(Val, binary) when is_list(Val) -> list_to_binary(Val);
-encode_value(Val, binary) -> Val;
-encode_value(Val, process) when is_pid(Val) -> list_to_binary(pid_to_list(Val));
-encode_value(Val, process) when is_list(Val) -> list_to_binary(Val);
-encode_value(Val, process) when is_atom(Val) -> list_to_binary(atom_to_list(Val));
-encode_value(Val, integer) -> list_to_binary(integer_to_list(Val));
-encode_value(Val, atom) -> list_to_binary(atom_to_list(Val));
-encode_value(_Val, undefined) -> throw(encoding_error).
+to_proper_key(Key) when is_float(Key) -> float_to_binary(Key);
+to_proper_key(Key) when is_integer(Key) -> integer_to_binary(Key);
+to_proper_key(Key) -> Key.
